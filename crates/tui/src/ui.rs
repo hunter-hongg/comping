@@ -17,8 +17,14 @@ use crate::markdown;
 
 /// 单栏与双栏的分界。
 const WIDE_ENOUGH: u16 = 100;
-/// 对话区与信息栏的比例。
-const SIDEBAR_RATIO: u16 = 30;
+/// 侧栏宽度。窄屏时收窄，保证对话区还剩得下内容。
+fn sidebar_width(total: u16) -> u16 {
+    match total {
+        t if t < 120 => 28,
+        t if t < 160 => 32,
+        _ => 36,
+    }
+}
 
 /// 主入口。
 pub fn render(frame: &mut ratatui::Frame, app: &mut App) {
@@ -34,9 +40,13 @@ pub fn render(frame: &mut ratatui::Frame, app: &mut App) {
         .split(area);
 
     if area.width >= WIDE_ENOUGH {
+        // 必须用 Min(0) 吃满剩余宽度。
+        // 曾经写成 Percentage(70) + Length(30)：Percentage 拿 70%，
+        // Length 拿固定 30 列，两者加起来不等于总宽，剩下的列没人分配，
+        // 就在右侧留出一条空白——终端越宽越明显（190 列空 31 列）。
         let cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(100 - SIDEBAR_RATIO), Constraint::Length(SIDEBAR_RATIO)])
+            .constraints([Constraint::Min(0), Constraint::Length(sidebar_width(area.width))])
             .split(vertical[0]);
         render_conversation(frame, app, cols[0]);
         render_sidebar(frame, app, cols[1]);
@@ -663,5 +673,117 @@ mod arg_tests {
         // 变成认不出的碎片
         assert_eq!(elide("abcdefghij", 5), "abcd…");
         assert_eq!(elide("abc", 5), "abc");
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    /// 渲染一屏，返回 (每行的字符, 每行的原始 cell 数)。
+    ///
+    /// 注意区分两者：宽字符占 2 个 cell 却只产 1 个字符，
+    /// 用字符数判断"是否撑满"会把情况看错。
+    fn render_rows(app: &mut App, w: u16, h: u16) -> Vec<(String, Vec<String>)> {
+        let backend = TestBackend::new(w, h);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| render(f, app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| {
+                let cells: Vec<String> = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
+                let text: String = cells.concat();
+                (text.trim_end().to_string(), cells)
+            })
+            .collect()
+    }
+
+    /// 顶栏（对话 + 侧栏那一行）最右非空 cell 的**列号**（1 起）。
+    ///
+    /// 必须看列号而不是看那个位置上是什么字符——
+    /// 布局留白时边缘仍是 `┐`，只是提前了十几列，光看字符发现不了。
+    fn rightmost_col(rows: &[(String, Vec<String>)]) -> usize {
+        let cells = &rows[0].1;
+        let mut last = cells.len();
+        while last > 0 && cells[last - 1].trim().is_empty() {
+            last -= 1;
+        }
+        last
+    }
+
+    /// 回归：横向用 Percentage + Length 切分，两者加起来不等于总宽，
+    /// 右侧会留一条空白。终端越宽越明显（190 列空 31 列）。
+    #[test]
+    fn 布局撑满整个宽度() {
+        for w in [100u16, 120, 130, 160, 190, 240, 300] {
+            let mut app = App::new();
+            app.workspace = "/tmp".into();
+            let rows = render_rows(&mut app, w, 30);
+            let col = rightmost_col(&rows);
+            assert_eq!(
+                col, w as usize,
+                "宽度 {w}：顶栏只画到第 {col} 列，右侧空了 {} 列",
+                w as usize - col
+            );
+        }
+    }
+
+    #[test]
+    fn 顶栏画满了每一个cell() {
+        for w in [130u16, 190, 240] {
+            let mut app = App::new();
+            let rows = render_rows(&mut app, w, 30);
+            let (text, _) = &rows[0];
+            // 宽字符在 TestBackend 里会多出一个空格占位，先去空格再找
+            assert!(
+                text.replace(' ', "").contains("对话"),
+                "宽度 {w} 下顶栏内容异常: {text:?}"
+            );
+            assert_eq!(
+                rightmost_col(&rows), w as usize,
+                "宽度 {w}：顶栏只画到第 {} 列", rightmost_col(&rows)
+            );
+        }
+    }
+
+    #[test]
+    fn 侧栏宽度随屏幕伸缩() {
+        assert_eq!(sidebar_width(100), 28);
+        assert_eq!(sidebar_width(130), 32);
+        assert_eq!(sidebar_width(200), 36);
+        assert!(sidebar_width(100) < 100);
+    }
+
+    #[test]
+    fn 窄屏降级为单栏不溢出() {
+        let mut app = App::new();
+        let rows = render_rows(&mut app, 80, 20);
+        for (text, cells) in &rows {
+            assert!(cells.len() <= 80, "超宽: {text}");
+        }
+        let joined: String = rows.iter().map(|(t, _)| t.clone()).collect();
+        assert!(!joined.contains("状态"), "单栏模式下不该画侧栏");
+    }
+
+    #[test]
+    fn 极窄终端也不崩() {
+        let mut app = App::new();
+        let rows = render_rows(&mut app, 40, 10);
+        assert_eq!(rows.len(), 10);
+    }
+
+    #[test]
+    fn 有内容时也能撑满() {
+        let mut app = App::new();
+        app.entries.push(Entry::User {
+            text: "很长的一段输入用来把对话区填满，看看布局会不会被撑破".into(),
+        });
+        app.streaming = "助手正在输出…".into();
+        for w in [130u16, 200] {
+            let rows = render_rows(&mut app, w, 30);
+            assert_eq!(rightmost_col(&rows), w as usize, "宽度 {w} 未撑满");
+        }
     }
 }
