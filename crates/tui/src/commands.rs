@@ -122,6 +122,7 @@ async fn model(app: &mut App, rt: &mut Runtime, arg: &str) {
         Ok(m) => {
             let window = rt.budget.context_window;
             app.status.model = m.clone();
+            app.status.model_display = rt.model_display_name(&m);
             app.status.context_window = window;
             notice(
                 app,
@@ -162,6 +163,7 @@ fn provider(app: &mut App, rt: &mut Runtime, arg: &str) {
         Ok(()) => {
             app.status.provider = rt.provider_name.clone();
             app.status.model = rt.model.clone();
+            app.status.model_display = rt.model_display_name(&rt.model);
             app.status.context_window = rt.budget.context_window;
             notice(
                 app,

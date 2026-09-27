@@ -68,7 +68,7 @@ impl Tool for ListDir {
     }
 
     async fn call(&self, args: Value) -> Result<ToolOutcome, ToolError> {
-        let raw = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
+        let raw = optional_path(&args);
         let dir = self
             .ws
             .resolve(raw)
@@ -135,6 +135,19 @@ impl Entry {
             format!("{rel}  ({} 字节)", human_size(self.size))
         }
     }
+}
+
+/// 取可选的 `path` 参数。
+///
+/// schema 里 path 是可选的，所以**省略**和**传空串**必须等价——
+/// 模型很爱传 `""` 表示根目录，早期版本在这里报"路径为空"，
+/// 逼模型自己纠正一轮，白烧 token。
+fn optional_path(args: &Value) -> &str {
+    args.get("path")
+        .and_then(|p| p.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(".")
 }
 
 /// 递归深度上限，防止误扫超大目录。
@@ -288,7 +301,7 @@ impl Tool for Grep {
             .and_then(|p| p.as_str())
             .ok_or_else(|| ToolError::InvalidParams("缺少 `pattern`".into()))?;
 
-        let raw_path = args.get("path").and_then(|p| p.as_str()).unwrap_or(".");
+        let raw_path = optional_path(&args);
         let root = self
             .ws
             .resolve(raw_path)

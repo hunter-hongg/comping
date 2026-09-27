@@ -154,19 +154,20 @@ impl Tool for Bash {
             format!("失败，退出码 {code}")
         };
 
-        let summary = format!("{status} · {:.1}s", elapsed.as_secs_f32());
+        // 耗时由 UI 统一显示（它对所有工具一视同仁），
+        // 这里再塞一遍会变成 "成功 · 0.0s  0.0s"
+        let summary = status.clone();
         let body = format!("[{status}]\n{out}");
 
-        // 失败与超时都用 err 形态，agent 循环会把它标成"需要模型自己纠正"
         let mut outcome = if code == 0 && !timed_out {
-            ToolOutcome::ok(summary.clone(), body)
+            ToolOutcome::ok(summary, body)
         } else {
             let mut o = ToolOutcome::err(body);
-            o.summary = summary.clone();
+            o.summary = summary;
             o
         };
-        outcome.summary = summary;
         outcome.truncated_to = truncated_to;
+        let _ = elapsed;
         Ok(outcome)
     }
 }

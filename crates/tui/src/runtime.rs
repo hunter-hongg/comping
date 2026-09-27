@@ -263,6 +263,16 @@ pub async fn persist(rt: &mut Runtime, conversation: Conversation) -> Result<()>
 // ==================================================== `/` 命令需要的操作
 
 impl Runtime {
+    /// 模型的友好名。侧栏优先显示它，原始 id 又长又带命名空间前缀。
+    pub fn model_display_name(&self, model: &str) -> Option<String> {
+        self.provider
+            .models()
+            .iter()
+            .find(|m| m.id == model)
+            .map(|m| m.display_name.clone())
+            .filter(|d| !d.trim().is_empty() && d != model)
+    }
+
     /// 切模型。只改字段，不重建 provider（重建会丢连接池）。
     pub fn switch_model(&mut self, model: &str) -> Result<&str> {
         let model = model.trim();

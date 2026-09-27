@@ -23,6 +23,9 @@ pub enum Entry {
     },
     /// 工具调用。`output` 为 None 表示还在跑。
     Tool {
+        /// 调用 id。**必须靠它回填结果**——同一轮里可能有多个同名调用
+        /// （比如两个 list_dir），按名字匹配会把结果贴到错误的行上。
+        id: String,
         name: String,
         args: String,
         summary: String,
@@ -207,6 +210,9 @@ pub enum Focus {
 pub struct Status {
     pub provider: String,
     pub model: String,
+    /// 模型的友好名，来自配置里的 `display_name`。
+    /// 侧栏优先显示它——原始 id 常常又长又带命名空间前缀。
+    pub model_display: Option<String>,
     pub context_window: u32,
     pub used_tokens: u32,
     pub total_usage: Usage,
@@ -268,6 +274,7 @@ impl App {
                 // 流式文本先落成一条助手消息，工具行紧随其后
                 self.flush_streaming(Usage::default(), StopReason::ToolUse, 0);
                 self.entries.push(Entry::Tool {
+                    id: call.id.clone(),
                     name: call.name.clone(),
                     args: call.arguments_json(),
                     summary: "执行中…".into(),
@@ -282,12 +289,11 @@ impl App {
                 outcome,
                 elapsed_ms,
             } => {
-                // 找最近一条同名、仍在执行的工具行回填。
-                // 并行执行时同名列可能有多条，倒着找最保险。
-                let target = self
-                    .entries
-                    .iter()
-                    .rposition(|e| matches!(e, Entry::Tool { name, output: None, .. } if *name == call.name));
+                // 按调用 id 精确回填。同名并行调用（两个 list_dir）
+                // 才不会互相串台——按名字找会贴错行。
+                let target = self.entries.iter().position(|e| {
+                    matches!(e, Entry::Tool { id, output: None, .. } if *id == call.id)
+                });
 
                 if let Some(i) = target {
                     if let Entry::Tool {
@@ -317,6 +323,12 @@ impl App {
                 self.status.max_steps = self.status.max_steps.max(step);
                 self.status.last_elapsed_ms = elapsed_ms;
                 self.status.total_usage.merge(&usage);
+                // 上下文占用：最近一次请求的提示词规模就是当前占用量。
+                // 之前只在启动时算一次，所以整个会话里进度条都钉在 0%。
+                let prompt = usage.input_tokens
+                    + usage.cache_read_tokens
+                    + usage.cache_write_tokens;
+                self.status.used_tokens = prompt.max(self.status.used_tokens);
                 if !had_tool_calls {
                     self.status.last_run = Some(RunEndReason::Completed);
                 }
@@ -433,6 +445,20 @@ impl App {
 
     pub fn scroll_to_bottom(&mut self) {
         self.scroll = None;
+    }
+
+    /// 侧栏该显示的模型名：有 display_name 就用它，否则退回 id。
+    pub fn model_label(&self) -> &str {
+        match &self.status.model_display {
+            Some(d) if !d.trim().is_empty() => d,
+            _ => &self.status.model,
+        }
+    }
+
+    /// 某条工具条目是否还在执行中。
+    #[cfg(test)]
+    pub fn is_tool_pending(&self, i: usize) -> bool {
+        matches!(self.entries.get(i), Some(Entry::Tool { output: None, .. }))
     }
 
     /// 折叠/展开某个工具条目。
@@ -644,5 +670,104 @@ mod tests {
         i.end();
         i.delete();
         assert_eq!(i.buffer, "bc");
+    }
+}
+
+#[cfg(test)]
+mod regression {
+    use super::*;
+    use agent_core::ToolOutcome;
+
+    fn call(id: &str, name: &str, args: &str) -> agent_core::ToolCall {
+        agent_core::ToolCall::new(id, name, serde_json::from_str(args).unwrap())
+    }
+
+    /// 回归：工具**失败**时以前不发 ToolCallFinished，界面上那行
+    /// "执行中…"永远转不完。工具报错在实践中非常常见（路径写错、
+    /// 参数缺失、被沙箱拒绝），所以每错一次就留一条幽灵条目。
+    #[test]
+    fn 工具失败后不留幽灵条目() {
+        let mut a = App::new();
+        a.on_agent_event(agent_core::AgentEvent::ToolCallStarted {
+            call: call("c1", "read_file", "{}"),
+        });
+        assert!(a.is_tool_pending(0), "刚启动时应在执行中");
+
+        a.on_agent_event(agent_core::AgentEvent::ToolCallFinished {
+            call: call("c1", "read_file", "{}"),
+            outcome: ToolOutcome::err("路径为空"),
+            elapsed_ms: 3,
+        });
+
+        assert!(!a.is_tool_pending(0), "失败后必须脱离执行中状态");
+        match &a.entries[0] {
+            Entry::Tool { ok, summary, output, .. } => {
+                assert!(!ok, "失败要标记成 !ok");
+                assert_eq!(summary, "路径为空");
+                assert!(output.is_some(), "失败也要有输出，好让用户看到原因");
+            }
+            other => panic!("应当是工具条目，实际 {other:?}"),
+        }
+    }
+
+    /// 回归：以前回填是"找最后一个同名的待执行条目"。
+    /// 同一轮两个 list_dir 时，结果会贴到错误的行上，
+    /// 而且有一条永远停在"执行中…"。
+    #[test]
+    fn 同名并行调用按id各自回填() {
+        let mut a = App::new();
+        a.on_agent_event(agent_core::AgentEvent::ToolCallStarted {
+            call: call("c1", "list_dir", r#"{"path":""}"#),
+        });
+        a.on_agent_event(agent_core::AgentEvent::ToolCallStarted {
+            call: call("c2", "list_dir", r#"{"path":"src"}"#),
+        });
+        assert!(a.is_tool_pending(0) && a.is_tool_pending(1));
+
+        // 故意让 c2 先完成
+        a.on_agent_event(agent_core::AgentEvent::ToolCallFinished {
+            call: call("c2", "list_dir", r#"{"path":"src"}"#),
+            outcome: ToolOutcome::ok("src (3 项)", "a b c"),
+            elapsed_ms: 1,
+        });
+        a.on_agent_event(agent_core::AgentEvent::ToolCallFinished {
+            call: call("c1", "list_dir", r#"{"path":""}"#),
+            outcome: ToolOutcome::ok("根 (4 项)", "x y z w"),
+            elapsed_ms: 2,
+        });
+
+        // 各自落在正确的行上
+        let s0 = match &a.entries[0] { Entry::Tool { summary, .. } => summary.clone(), _ => panic!() };
+        let s1 = match &a.entries[1] { Entry::Tool { summary, .. } => summary.clone(), _ => panic!() };
+        assert_eq!(s0, "根 (4 项)", "第 0 行应是 c1 的结果");
+        assert_eq!(s1, "src (3 项)", "第 1 行应是 c2 的结果");
+        assert!(!a.is_tool_pending(0) && !a.is_tool_pending(1));
+    }
+
+    /// 回归：上下文占用以前只在启动时算一次，整个会话里钉在 0%，
+    /// 而旁边却显示着真实的 token 用量——自相矛盾。
+    #[test]
+    fn 上下文占用随轮次更新() {
+        let mut a = App::new();
+        a.status.context_window = 200_000;
+        assert_eq!(a.status.used_tokens, 0);
+
+        a.on_agent_event(agent_core::AgentEvent::TurnEnd {
+            text: "好".into(),
+            usage: Usage {
+                input_tokens: 1_200,
+                output_tokens: 300,
+                cache_read_tokens: 4_000,
+                cache_write_tokens: 0,
+            },
+            stop_reason: StopReason::EndTurn,
+            had_tool_calls: false,
+            elapsed_ms: 10,
+            step: 1,
+        });
+
+        // 提示词规模 = 输入 + 缓存读，才是真正占掉的窗口
+        assert_eq!(a.status.used_tokens, 5_200);
+        assert!((a.status.used_ratio() - 0.026).abs() < 0.001);
     }
 }

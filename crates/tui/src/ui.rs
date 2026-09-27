@@ -137,6 +137,7 @@ pub fn build_lines(app: &App, width: u16) -> Vec<Line<'static>> {
                 ok,
                 elapsed_ms,
                 expanded,
+                ..
             } => {
                 if !lines.is_empty() {
                     lines.push(Line::from(""));
@@ -235,15 +236,57 @@ pub fn build_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     lines
 }
 
+/// 工具行里显示的参数摘要。
+///
+/// 直接摊开 JSON 的话每行都是 `{"path":"src/main.rs"}` 这种噪声，
+/// 占了半行宽度却没提供信息。只挑"最能说明这次调用在干嘛"的那个字段
+/// 显示，其余参数折叠成 `+N`。
 fn compact_args(args: &str) -> String {
-    const MAX: usize = 60;
-    let one_line = args.replace('\n', " ");
-    if one_line.chars().count() <= MAX {
-        one_line
-    } else {
-        let t: String = one_line.chars().take(MAX).collect();
-        format!("{t}…")
+    const MAX: usize = 68;
+    // 优先展示的字段，按"最常用"排序
+    const PRIORITY: &[&str] = &["command", "path", "pattern", "query", "file", "name"];
+
+    let v: serde_json::Value = match serde_json::from_str(args) {
+        Ok(v) => v,
+        Err(_) => return truncate_tail(&args.replace('\n', " "), MAX),
+    };
+    let Some(obj) = v.as_object() else {
+        return truncate_tail(&args.replace('\n', " "), MAX);
+    };
+
+    let shown = PRIORITY
+        .iter()
+        .find_map(|k| obj.get(*k).and_then(|x| x.as_str()).map(|x| (*k, x)))
+        // 没有优先字段就退而求其次：第一个字符串值
+        .or_else(|| {
+            obj.iter()
+                .find(|(_, x)| x.is_string())
+                .and_then(|(k, x)| x.as_str().map(|s| (k.as_str(), s)))
+        });
+
+    let Some((key, val)) = shown else {
+        return truncate_tail(&args.replace('\n', " "), MAX);
+    };
+
+    // 省略掉的字段数：让人知道"还有别的参数"
+    let hidden = obj.len().saturating_sub(1);
+    let mut out = format!("{key}={val}");
+    if hidden > 0 {
+        out.push_str(&format!(" +{hidden}"));
     }
+    truncate_tail(&out, MAX)
+}
+
+fn truncate_tail(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    if max <= 1 {
+        return "\u{2026}".to_string();
+    }
+    let keep = max - 1;
+    format!("{}\u{2026}", s.chars().take(keep).collect::<String>())
 }
 
 fn render_conversation(frame: &mut ratatui::Frame, app: &mut App, area: Rect) {
@@ -306,9 +349,13 @@ fn render_sidebar(frame: &mut ratatui::Frame, app: &App, area: Rect) {
         )));
     }
 
+    // 键占 10 列，减去边框留 2，余下才是值的宽度
+    let vw = inner.width.saturating_sub(12).max(6) as usize;
     section(&mut lines, "模型", t);
-    lines.push(kv("provider", &s.provider, t));
-    lines.push(kv("model", &s.model, t));
+    lines.push(kv("provider", &elide(&s.provider, vw), t));
+    // 优先用 display_name：模型 id 常常又长又带命名空间前缀，
+    // 中间省略会毁掉可读性（openco…ny-free 谁都认不出）
+    lines.push(kv("model", &elide(&app.model_label(), vw), t));
 
     section(&mut lines, "上下文", t);
     let ratio = s.used_ratio();
@@ -347,6 +394,9 @@ fn render_sidebar(frame: &mut ratatui::Frame, app: &App, area: Rect) {
     frame.render_widget(para, inner);
 }
 
+/// 键值行。值超长时**在中间省略**——
+/// 直接让 Paragraph 换行会把 `opencode-zen/space-bunny-free`
+/// 断成 `space-bunny-fre` + `e`，很难看。
 fn kv<'a>(k: &str, v: &str, t: &crate::theme::Theme) -> Line<'a> {
     Line::from(vec![
         Span::styled(format!("{k:<10}"), t.dimmed()),
@@ -354,12 +404,30 @@ fn kv<'a>(k: &str, v: &str, t: &crate::theme::Theme) -> Line<'a> {
     ])
 }
 
+/// 按可用宽度截断。**尾部省略**：模型 id 带命名空间前缀
+/// （`opencode-zen/space-bunny-free`），中间省略会把前缀和词根都切掉，
+/// 变成认不出的碎片。
+fn elide(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    if max <= 1 {
+        return "\u{2026}".to_string();
+    }
+    let keep = max - 1;
+    format!("{}\u{2026}", s.chars().take(keep).collect::<String>())
+}
+
 /// 上下文占用条。
+///
+/// 轨道用 `─` 而不是 `░`：后者密集排列时像一团噪点，
+/// 在 0% 时尤其明显，看着像渲染出错而不是"还没用"。
 fn bar(ratio: f32, width: u16, t: &crate::theme::Theme) -> Line<'static> {
     let width = width.max(4) as usize;
     let filled = ((ratio.clamp(0.0, 1.0) * width as f32) as usize).min(width);
     let color = t.bar_color(ratio);
-    let bar: String = "█".repeat(filled) + &"░".repeat(width - filled);
+    let bar: String = "█".repeat(filled) + &"─".repeat(width - filled);
     Line::from(Span::styled(bar, Style::default().fg(color)))
 }
 
@@ -540,5 +608,60 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         let t: String = s.chars().take(max).collect();
         format!("{t}…")
+    }
+}
+
+#[cfg(test)]
+mod arg_tests {
+    use super::*;
+
+    #[test]
+    fn 显示最有用的那个参数() {
+        assert_eq!(compact_args(r#"{"path":"src/main.rs"}"#), "path=src/main.rs");
+        assert_eq!(
+            compact_args(r#"{"command":"cargo test --all"}"#),
+            "command=cargo test --all"
+        );
+    }
+
+    #[test]
+    fn 其余参数折叠成计数() {
+        assert_eq!(
+            compact_args(r#"{"path":"a.rs","offset":1,"limit":20}"#),
+            "path=a.rs +2"
+        );
+    }
+
+    /// 回归：以前每行都摊开 JSON，半行宽度全是噪声
+    #[test]
+    fn 不再摊开原始_json() {
+        let out = compact_args(r#"{"path":"src/main.rs"}"#);
+        assert!(!out.contains('{'), "不该出现 JSON 花括号: {out}");
+        assert!(!out.contains('"'), "不该出现引号: {out}");
+    }
+
+    #[test]
+    fn 没有优先字段时取第一个字符串值() {
+        assert_eq!(compact_args(r#"{"weird":"value"}"#), "weird=value");
+    }
+
+    #[test]
+    fn 非_json也能显示() {
+        assert!(!compact_args("not json at all").is_empty());
+    }
+
+    #[test]
+    fn 超长会截断() {
+        let long = format!(r#"{{"path":"{}"}}"#, "x".repeat(200));
+        let out = compact_args(&long);
+        assert!(out.chars().count() <= 68, "长度 {} 超出上限", out.chars().count());
+    }
+
+    #[test]
+    fn elide_是尾部省略() {
+        // 回归：中间省略会把 opencode-zen/space-bunny-free
+        // 变成认不出的碎片
+        assert_eq!(elide("abcdefghij", 5), "abcd…");
+        assert_eq!(elide("abc", 5), "abc");
     }
 }

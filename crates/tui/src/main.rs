@@ -176,6 +176,7 @@ async fn interactive(rt: &mut Runtime) -> Result<()> {
     let mut app = App::new();
     app.status.provider = rt.provider_name.clone();
     app.status.model = rt.model.clone();
+    app.status.model_display = rt.model_display_name(&rt.model);
     app.status.context_window = rt.budget.context_window;
     app.status.max_steps = rt.agent_config.max_steps;
     app.status.total_usage = rt.conversation.total_usage;
@@ -343,6 +344,7 @@ enum Action {
 fn sync_status(app: &mut App, rt: &runtime::Runtime) {
     app.status.provider = rt.provider_name.clone();
     app.status.model = rt.model.clone();
+    app.status.model_display = rt.model_display_name(&rt.model);
     app.status.context_window = rt.budget.context_window;
     app.status.used_tokens = rt.conversation.estimate_tokens();
 }

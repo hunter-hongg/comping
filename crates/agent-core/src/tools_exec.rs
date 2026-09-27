@@ -232,13 +232,18 @@ impl Registry {
             let Some((idx, call, res, elapsed)) = next else {
                 break;
             };
-            if let Ok(out) = &res {
-                let _ = tx.send(AgentEvent::ToolCallFinished {
-                    call: call.clone(),
-                    outcome: out.clone(),
-                    elapsed_ms: elapsed,
-                });
-            }
+            // 失败也要发事件：UI 是靠这个把"执行中…"换成结果的。
+            // 以前只在 Ok 时发，导致每个失败的工具都在界面上留一条
+            // 永远转不完的幽灵条目（工具报错在实践中很常见）。
+            let outcome = match &res {
+                Ok(out) => out.clone(),
+                Err(e) => ToolOutcome::err(e.clone()),
+            };
+            let _ = tx.send(AgentEvent::ToolCallFinished {
+                call: call.clone(),
+                outcome,
+                elapsed_ms: elapsed,
+            });
             if idx < done.len() {
                 done[idx] = true;
             }
