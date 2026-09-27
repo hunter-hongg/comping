@@ -1,0 +1,49 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/agent-core",
+    "crates/llm",
+    "crates/tools",
+    "crates/session",
+    "crates/prompt",
+    "crates/tui",
+    "crates/mock-provider",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+
+[workspace.dependencies]
+agent-core = { path = "crates/agent-core" }
+llm = { path = "crates/llm" }
+tools = { path = "crates/tools" }
+session = { path = "crates/session" }
+prompt = { path = "crates/prompt" }
+
+anyhow = "1.0"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "process", "fs", "io-util"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+futures = "0.3"
+async-trait = "0.1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "webpki-roots", "charset", "http2", "stream"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+globset = "0.4"
+dirs = "6.0"
+uuid = { version = "1", features = ["v4"] }
+similar = "3.2"
+ratatui = "0.30.2"
+crossterm = "0.29.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

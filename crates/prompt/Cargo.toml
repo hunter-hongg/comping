@@ -1,0 +1,10 @@
+[package]
+name = "prompt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "System prompts and built-in slash commands"
+
+# 这个 crate 是纯字符串拼装，不依赖任何东西。
+[dependencies]

@@ -1,0 +1,28 @@
+[package]
+name = "comping"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "comping —— 终端里的编程助手"
+
+[[bin]]
+name = "comping"
+path = "src/main.rs"
+
+[dependencies]
+agent-core.workspace = true
+llm.workspace = true
+tools.workspace = true
+session.workspace = true
+prompt.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true

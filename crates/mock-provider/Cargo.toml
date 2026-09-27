@@ -1,0 +1,14 @@
+[package]
+name = "mock-provider"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "可脚本化的假模型服务，用于测试协议适配器（仅开发用，不发布）"
+
+[[bin]]
+name = "mock-provider"
+path = "src/bin/serve.rs"
+
+[dependencies]
+serde_json.workspace = true
